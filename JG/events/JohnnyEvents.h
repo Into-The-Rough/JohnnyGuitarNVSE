@@ -26,6 +26,7 @@ DEFINE_COMMAND_PLUGIN(SetOnNPCResponseEventHandler, , 0, 4, kParams_Event_OneInt
 DEFINE_COMMAND_PLUGIN(SetOnGeneralSubtitleEventHandler, "Fires upon the display of a General Subtitle", 0, 4, kParams_Event_OneInt);
 DEFINE_COMMAND_PLUGIN(SetOnReputationChangeEventHandler, "Fires upon the change of a reputation", 0, 4, kParams_Event_OneForm);
 DEFINE_COMMAND_ALT_PLUGIN(SetOnNPCActorValueChangeEventHandler, SetJohnnyOnNPCActorValueEventHandler, , 0, 5, kParams_Event_OneForm_OneInt)
+DEFINE_COMMAND_ALT_PLUGIN(SetJohnnyOnCornerMessageEventHandler, SetOnCornerMessageEventHandler, "Fires upon the display of a corner message", 0, 3, kParams_Event);
 
 EventInformation* OnDyingHandler;
 EventInformation* OnStartQuestHandler;
@@ -52,6 +53,7 @@ EventInformation* OnNPCResponseHandler;
 EventInformation* OnGeneralSubtitleHandler;
 EventInformation* OnReputationChangeHandler;
 EventInformation* OnNPCAVChangeHandler;
+EventInformation* OnCornerMessageHandler;
 
 UInt32 handlePreRenderEvent() {
 	for (auto const& callback : OnRenderGamePreUpdateHandler->callbacks) {
@@ -465,6 +467,50 @@ void __fastcall HandleOnReputationChange(TESReputation* apRep) {
 	}
 }
 
+// Struct to queue early corner messages before script handlers are registered
+struct QueuedCornerMessage {
+	std::string msgText;
+	UInt32 iconType;
+	std::string iconPath;
+	std::string soundPath;
+	float displayTime;
+};
+
+// Queue for early messages (shared across translation units)
+std::vector<QueuedCornerMessage> g_queuedCornerMessages;
+
+bool __fastcall HandleOnCornerMessage(HUDMainMenu* menu, void* edx, char* msgText, UInt32 iconType, char* iconPath, char* soundPath, float displayTime, bool instantEndCurrentMessage)
+{
+	if (msgText && msgText[0]) {
+		const char* msgTextStr = msgText;
+		const char* iconPathStr = (iconPath && iconPath[0]) ? iconPath : "";
+		const char* soundPathStr = (soundPath && soundPath[0]) ? soundPath : "";
+
+		if (OnCornerMessageHandler->callbacks.size() == 0) {
+			g_queuedCornerMessages.push_back({msgTextStr, iconType, iconPathStr, soundPathStr, displayTime});
+		} else {
+			if (!g_queuedCornerMessages.empty()) {
+				for (const auto& msg : g_queuedCornerMessages) {
+					for (auto const& callback : OnCornerMessageHandler->callbacks) {
+						CallUDF(callback.script, nullptr, OnCornerMessageHandler->numMaxArgs,
+							msg.msgText.c_str(), msg.iconType, msg.iconPath.c_str(),
+							msg.soundPath.c_str(), *(UInt32*)&msg.displayTime);
+					}
+				}
+				g_queuedCornerMessages.clear();
+			}
+
+			for (auto const& callback : OnCornerMessageHandler->callbacks) {
+				CallUDF(callback.script, nullptr, OnCornerMessageHandler->numMaxArgs, msgTextStr, iconType, iconPathStr, soundPathStr, *(UInt32*)&displayTime);
+			}
+		}
+	}
+
+	typedef bool (__thiscall *_QueueUIMessage)(HUDMainMenu*, char*, UInt32, char*, char*, float, bool);
+	_QueueUIMessage originalFunc = (_QueueUIMessage)0x775380;
+	return originalFunc(menu, msgText, iconType, iconPath, soundPath, displayTime, instantEndCurrentMessage);
+}
+
 //Fires when general subtitles are sent to the HUD.
 char __fastcall HandleOnGeneralSubtitleEvent(HUDMainMenu* thisPtr, void* edx, char* apText, BSSoundHandle akSound, NiPoint3 akPos, TESObjectREFR* apTarget, bool abInstant)
 {
@@ -853,6 +899,30 @@ bool Cmd_SetOnReputationChangeEventHandler_Execute(COMMAND_ARGS) {
 	return true;
 }
 
+bool Cmd_SetJohnnyOnCornerMessageEventHandler_Execute(COMMAND_ARGS) {
+	UInt32 setOrRemove = 0;
+	Script* script = nullptr;
+	UInt32 flags = 0;
+	if (ExtractArgsEx(EXTRACT_ARGS_EX, &setOrRemove, &script, &flags) && IS_TYPE(script, Script)) {
+		if (OnCornerMessageHandler) {
+			if (setOrRemove) {
+				OnCornerMessageHandler->RegisterEvent(script, nullptr);
+				if (!g_queuedCornerMessages.empty()) {
+					for (const auto& msg : g_queuedCornerMessages) {
+						CallUDF(script, nullptr, OnCornerMessageHandler->numMaxArgs,
+							msg.msgText.c_str(), msg.iconType, msg.iconPath.c_str(),
+							msg.soundPath.c_str(), *(UInt32*)&msg.displayTime);
+					}
+					g_queuedCornerMessages.clear();
+				}
+			} else {
+				OnCornerMessageHandler->RemoveEvent(script, nullptr);
+			}
+		}
+	}
+	return true;
+}
+
 void HandleEventHooks() {
 	OnDyingHandler = JGCreateEvent("OnDying", 1, 1);
 	OnStartQuestHandler = JGCreateEvent("OnStartQuest", 1, 1);
@@ -876,6 +946,7 @@ void HandleEventHooks() {
 	OnGeneralSubtitleHandler = JGCreateEvent("OnGeneralSubtitle", 5, 1, FilterFormInt::Create);
 	OnReputationChangeHandler = JGCreateEvent("OnReputationChangeHandler", 3, 1);
 	OnNPCAVChangeHandler = JGCreateEvent("OnNPCActorValueChangeHandler", 3, 2, FilterFormInt::Create);
+	OnCornerMessageHandler = JGCreateEvent("OnCornerMessage", 5, 0);
 
 	CallUDF = g_scriptInterface->CallFunctionAlt;
 	WriteRelCall(0x55678A, (UInt32)HandleSeenDataUpdateEvent);
@@ -948,4 +1019,18 @@ void HandleEventHooks() {
 	WriteRelCall(0x7052B8, (uint32_t)HandleOnGeneralSubtitleEvent);
 
 	SafeWrite32(0x104BA6C, (uint32_t)HandleOnReputationChangeEvent);
+
+	WriteRelCall(0x705379, (UInt32)HandleOnCornerMessage);
+	WriteRelCall(0x7EE74D, (UInt32)HandleOnCornerMessage);
+	WriteRelCall(0x7EE87D, (UInt32)HandleOnCornerMessage);
+	WriteRelCall(0x7EEA6C, (UInt32)HandleOnCornerMessage);
+	WriteRelCall(0x833303, (UInt32)HandleOnCornerMessage);
+}
+
+void ReinstallCornerMessageHooks() {
+	WriteRelCall(0x705379, (UInt32)HandleOnCornerMessage);
+	WriteRelCall(0x7EE74D, (UInt32)HandleOnCornerMessage);
+	WriteRelCall(0x7EE87D, (UInt32)HandleOnCornerMessage);
+	WriteRelCall(0x7EEA6C, (UInt32)HandleOnCornerMessage);
+	WriteRelCall(0x833303, (UInt32)HandleOnCornerMessage);
 }

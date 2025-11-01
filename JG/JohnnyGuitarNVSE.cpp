@@ -107,6 +107,23 @@ void MessageHandler(NVSEMessagingInterface::Message* msg) {
 			break;
 		case NVSEMessagingInterface::kMessage_MainGameLoop:
 		{
+			static UInt32 hookReinstallCount = 0;
+			if (hookReinstallCount < 10) {
+				ReinstallCornerMessageHooks();
+				hookReinstallCount++;
+			}
+
+			if (!g_queuedCornerMessages.empty() && OnCornerMessageHandler && OnCornerMessageHandler->callbacks.size() > 0) {
+				for (const auto& msg : g_queuedCornerMessages) {
+					for (auto const& callback : OnCornerMessageHandler->callbacks) {
+						CallUDF(callback.script, nullptr, OnCornerMessageHandler->numMaxArgs,
+							msg.msgText.c_str(), msg.iconType, msg.iconPath.c_str(),
+							msg.soundPath.c_str(), *(UInt32*)&msg.displayTime);
+					}
+				}
+				g_queuedCornerMessages.clear();
+			}
+
 			if (g_interfaceManager->currentMode == 1) {
 			float power = getHUDShakePower();
 			if (power > 0.0f) {
@@ -565,6 +582,7 @@ extern "C" {
 		REG_CMD(IsNiSequenceActive);
 		REG_CMD(GetHotkeySlot);
 		REG_CMD(SetOnNPCActorValueChangeEventHandler);
+		REG_CMD(SetJohnnyOnCornerMessageEventHandler);
 
 		g_scriptInterface = (NVSEScriptInterface*)nvse->QueryInterface(kInterface_Script);
 		g_cmdTableInterface = (NVSECommandTableInterface*)nvse->QueryInterface(kInterface_CommandTable);

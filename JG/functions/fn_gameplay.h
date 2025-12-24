@@ -1,6 +1,17 @@
 #pragma once
 #include "GameForms.h"
 #include "ParamInfos.h"
+#include <vector>
+#include <algorithm>
+
+static ParamInfo kParams_GetRefsSortedByDistance[5] = {
+	{ "maxDistance",     kParamType_Float,   0 },
+	{ "formType",        kParamType_Integer, 1 },
+	{ "cellDepth",       kParamType_Integer, 1 },
+	{ "includeTakenRefs",kParamType_Integer, 1 },
+	{ "baseForm",        kParamType_AnyForm, 1 },
+};
+
 // Functions affecting gameplay
 DEFINE_COMMAND_PLUGIN(ToggleLevelUpMenu, , 0, 1, kParams_OneInt);
 DEFINE_COMMAND_PLUGIN(TogglePipBoy, , 0, 1, kParams_OneOptionalInt);
@@ -75,6 +86,7 @@ DEFINE_COMMAND_PLUGIN(PathToRef, , 1, 2, kParams_OneRefOneFloat);
 DEFINE_CMD_NO_ARGS(GetGrenadeHoldTime);
 DEFINE_COMMAND_PLUGIN(GetWeaponsForMod, , 0, 1, kParams_OneObjectID);
 DEFINE_CMD_ALT_COND_PLUGIN(IsInDialogueWithPlayer, , "", 1, nullptr);
+DEFINE_COMMAND_PLUGIN(GetRefsSortedByDistance, , 0, 5, kParams_GetRefsSortedByDistance);
 
 void(__cdecl* HandleActorValueChange)(ActorValueOwner* avOwner, int avCode, float oldVal, float newVal, ActorValueOwner* avOwner2) =
 (void(__cdecl*)(ActorValueOwner*, int, float, float, ActorValueOwner*))0x66EE50;
@@ -1582,5 +1594,149 @@ bool Cmd_IsInDialogueWithPlayer_Eval(COMMAND_ARGS_EVAL) {
 bool Cmd_IsInDialogueWithPlayer_Execute(COMMAND_ARGS) {
 	*result = 0;
 	Cmd_IsInDialogueWithPlayer_Eval(thisObj, nullptr, nullptr, result);
+	return true;
+}
+
+enum {
+	kFormTypeFilter_AnyType = 0,
+	kFormTypeFilter_Actor = 200,
+	kFormTypeFilter_InventoryItem = 201,
+};
+
+static bool MatchesBaseForm(TESObjectREFR* refr, TESForm* baseForm) {
+	if (!baseForm) return true;
+	return refr->baseForm == baseForm;
+}
+
+static bool IsTakenRef(TESObjectREFR* refr) {
+	if (!refr->IsTaken()) return false;
+	UInt8 formType = refr->baseForm->typeID;
+	return formType == kFormType_TESObjectARMO || formType == kFormType_TESObjectBOOK ||
+	       formType == kFormType_TESObjectCLOT || formType == kFormType_IngredientItem ||
+	       formType == kFormType_TESObjectMISC || formType == kFormType_TESObjectWEAP ||
+	       formType == kFormType_TESAmmo || formType == kFormType_TESKey ||
+	       formType == kFormType_AlchemyItem || formType == kFormType_BGSNote;
+}
+
+static bool IsInventoryItemType(UInt8 formType) {
+	return formType == kFormType_TESObjectARMO || formType == kFormType_TESObjectBOOK ||
+	       formType == kFormType_TESObjectCLOT || formType == kFormType_IngredientItem ||
+	       formType == kFormType_TESObjectMISC || formType == kFormType_TESObjectWEAP ||
+	       formType == kFormType_TESAmmo || formType == kFormType_TESKey ||
+	       formType == kFormType_AlchemyItem || formType == kFormType_BGSNote ||
+	       formType == kFormType_TESObjectARMA || formType == kFormType_TESObjectIMOD ||
+	       formType == kFormType_TESCasinoChips || formType == kFormType_TESCaravanCard ||
+	       formType == kFormType_TESCaravanMoney;
+}
+
+static bool MatchesFormType(TESObjectREFR* refr, UInt32 formType, bool includeTakenRefs) {
+	if (!refr || !refr->baseForm) return false;
+	if (!includeTakenRefs && IsTakenRef(refr)) return false;
+
+	UInt8 baseType = refr->baseForm->typeID;
+
+	switch (formType) {
+		case kFormTypeFilter_AnyType:
+			return true;
+		case kFormTypeFilter_Actor:
+			if (refr->baseForm->refID == 7) return false;
+			return baseType == kFormType_TESCreature || baseType == kFormType_TESNPC;
+		case kFormTypeFilter_InventoryItem:
+			return IsInventoryItemType(baseType);
+		default:
+			if (baseType == kFormType_TESNPC && refr->baseForm->refID == 7) return false;
+			return baseType == formType;
+	}
+}
+
+bool Cmd_GetRefsSortedByDistance_Execute(COMMAND_ARGS) {
+	*result = 0;
+
+	float maxDistance = 0;
+	UInt32 formType = kFormTypeFilter_AnyType;
+	SInt32 cellDepth = 0;
+	UInt32 includeTakenRefs = 0;
+	TESForm* baseForm = nullptr;
+
+	if (!ExtractArgsEx(EXTRACT_ARGS_EX, &maxDistance, &formType, &cellDepth, &includeTakenRefs, &baseForm))
+		return true;
+
+	if (maxDistance <= 0) {
+		if (IsConsoleMode()) Console_Print("GetRefsSortedByDistance >> maxDistance must be > 0");
+		return true;
+	}
+
+	PlayerCharacter* player = PlayerCharacter::GetSingleton();
+	if (!player || !player->parentCell) return true;
+
+	NiPoint3* playerPos = player->GetPos();
+	float maxDistSq = maxDistance * maxDistance;
+
+	struct RefWithDist {
+		TESObjectREFR* ref;
+		float distance;
+	};
+	std::vector<RefWithDist> refs;
+
+	TESObjectCELL* playerCell = player->parentCell;
+	TESWorldSpace* world = playerCell->worldSpace;
+
+	if (cellDepth == -1) {
+		Setting* uGridSetting = nullptr;
+		if (GameSettingCollection::GetSingleton()->GetGameSetting("uGridsToLoad", &uGridSetting) && uGridSetting) {
+			cellDepth = uGridSetting->data.uint;
+		} else {
+			cellDepth = 5;
+		}
+	}
+
+	auto ProcessCell = [&](TESObjectCELL* cell) {
+		if (!cell) return;
+		for (auto iter = cell->objectList.Begin(); !iter.End(); ++iter) {
+			TESObjectREFR* refr = iter.Get();
+			if (!refr || refr == player) continue;
+			if (!MatchesFormType(refr, formType, includeTakenRefs != 0)) continue;
+			if (!MatchesBaseForm(refr, baseForm)) continue;
+
+			NiPoint3* refrPos = refr->GetPos();
+			if (!refrPos) continue;
+
+			float distSq = playerPos->CalculateDistSquared(refrPos);
+			if (distSq > maxDistSq) continue;
+
+			refs.push_back({ refr, sqrtf(distSq) });
+		}
+	};
+
+	ProcessCell(playerCell);
+
+	if (world && cellDepth > 0 && playerCell->coords.exterior) {
+		SInt32 baseX = playerCell->coords.exterior->x;
+		SInt32 baseY = playerCell->coords.exterior->y;
+
+		for (SInt32 dx = -cellDepth; dx <= cellDepth; dx++) {
+			for (SInt32 dy = -cellDepth; dy <= cellDepth; dy++) {
+				if (dx == 0 && dy == 0) continue;
+				UInt32 key = ((baseX + dx) << 16) | ((baseY + dy) & 0xFFFF);
+				ProcessCell(world->cellMap->Lookup(key));
+			}
+		}
+	}
+
+	std::sort(refs.begin(), refs.end(), [](const RefWithDist& a, const RefWithDist& b) {
+		return a.distance < b.distance;
+	});
+
+	NVSEArrayVar* arr = g_arrInterface->CreateArray(nullptr, 0, scriptObj);
+	for (const auto& item : refs) {
+		g_arrInterface->AppendElement(arr, NVSEArrayElement(item.ref));
+	}
+
+	g_arrInterface->AssignCommandResult(arr, result);
+
+	if (IsConsoleMode()) {
+		Console_Print("GetRefsSortedByDistance >> Found %d refs within %.1f units", refs.size(), maxDistance);
+	}
+
 	return true;
 }

@@ -578,6 +578,7 @@ extern "C" {
 		REG_TYPED_CMD(GetTopicInfo, Array);
 		REG_CMD(IsMenuPaused);
 		REG_CMD(IsInDialogueWithPlayer);
+		REG_TYPED_CMD(GetRefsSortedByDistance, Array);
 		REG_CMD(SetHUDVisibilityOverride);
 		REG_CMD(GetHUDVisibilityOverride);
 		REG_CMD(UpdateRepairMenu);
